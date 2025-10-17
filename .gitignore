@@ -1,0 +1,16 @@
+# Ignore everything
+*
+
+# Un-ignore the desired file types
+!*.py
+!*.csv
+!*.md
+
+# Un-ignore all directories so git can traverse them
+!*/
+
+# Don't ignore the .gitignore file itself
+!.gitignore
+
+# Ignore the Lib folder
+Lib/
