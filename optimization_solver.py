@@ -2,15 +2,25 @@ import pandas as pd
 import requests
 import json
 import os
+from datetime import datetime, timedelta ### NEW ###
+import time ### NEW ###
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
 # The fixed time in minutes spent at each customer location for the delivery.
 SERVICE_TIME_MINUTES = 5
 
+### NEW: Traffic and Departure Time Configuration ###
+# Set the day and hour you are planning for.
+# 0 = today, 1 = tomorrow, etc.
+PLANNING_DAY_OFFSET = 1
+# Set the hour in 24-hour format (e.g., 11 for 11:00 AM)
+PLANNING_HOUR = 11
+
 # --- API Key Configuration (Unchanged) ---
-API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "YOUR_API_KEY_HERE")
-if API_KEY == "YOUR_API_KEY_HERE":
+# API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+API_KEY = "AIzaSyC_hI6BowrJPojeBiRldmuFVf3aqsSRZbg"
+if API_KEY == "AIzaSyC_hI6BowrJPojeBiRldmuFVf3aqsSRZbg":
     print("WARNING: Using a placeholder API key. Please replace 'YOUR_API_KEY_HERE' with your actual Google Maps API key.")
 
 # --- Caching (Unchanged) ---
@@ -25,24 +35,36 @@ def save_cache():
     with open(DISTANCE_CACHE_FILE, 'w') as f:
         json.dump(distance_cache, f, indent=4)
 
-def get_real_travel_time(lat1, lon1, lat2, lon2):
-    """Gets the real-world travel time in MINUTES from the Google Maps Directions API."""
+### MODIFIED: Function now accepts a departure time ###
+def get_real_travel_time(lat1, lon1, lat2, lon2, departure_timestamp):
+    """
+    Gets the real-world travel time in MINUTES from the Google Maps Directions API,
+    accounting for predictive traffic based on the departure_timestamp.
+    """
     origin = f"{lat1},{lon1}"
     destination = f"{lat2},{lon2}"
-    cache_key = f"{origin}->{destination}"
+    
+    # The cache key now includes the timestamp to store traffic-specific data
+    cache_key = f"{origin}->{destination}@{departure_timestamp}"
+    
     if cache_key in distance_cache:
         return distance_cache[cache_key]
-    url = f"https://maps.googleapis.com/maps/api/directions/json?origin={origin}&destination={destination}&key={API_KEY}"
+        
+    # Add the departure_time parameter to the API request
+    url = (f"https://maps.googleapis.com/maps/api/directions/json?"
+           f"origin={origin}&destination={destination}&departure_time={departure_timestamp}"
+           f"&traffic_model=best_guess&key={API_KEY}")
+           
     try:
         response = requests.get(url)
         data = response.json()
         if data['status'] == 'OK':
-            duration_seconds = data['routes'][0]['legs'][0]['duration']['value']
+            # Get "duration_in_traffic" if available, otherwise fall back to standard duration
+            duration_seconds = data['routes'][0]['legs'][0].get('duration_in_traffic', data['routes'][0]['legs'][0]['duration'])['value']
             duration_minutes = round(duration_seconds / 60)
             distance_cache[cache_key] = duration_minutes
             return duration_minutes
         else:
-            # This error will no longer appear for same-point lookups, but is kept for other potential errors.
             print(f"API Error for {origin}->{destination}: {data.get('status', 'Unknown Status')}")
             return 99999
     except Exception as e:
@@ -66,6 +88,7 @@ def get_solution_for_restaurant(restaurant_name):
         print(f"Restaurant '{restaurant_name}' not found.")
         return None, None
     
+    # ... (rest of data preparation is the same)
     customer_subzones = df_orders[df_orders['Restaurant name'] == restaurant_name]['Subzone'].unique()
     locations = [depot_info]
     demands = [0]
@@ -84,45 +107,48 @@ def get_solution_for_restaurant(restaurant_name):
             time_windows.append((earliest, latest))
     if len(locations) <= 1: return None, None
     
-    # --- Create Time Matrix ---
-    print("Building travel time matrix using Google Maps API...")
+    ### MODIFIED: Calculate the departure timestamp ###
+    # --- Create Time Matrix with Traffic Prediction ---
+    now = datetime.now()
+    planning_day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=PLANNING_DAY_OFFSET)
+    planning_datetime = planning_day.replace(hour=PLANNING_HOUR, minute=0)
+    departure_timestamp = int(time.mktime(planning_datetime.timetuple()))
+    
+    print(f"Building traffic-aware travel time matrix for departure at: {planning_datetime.strftime('%Y-%m-%d %I:%M %p')}...")
+    
     num_locations = len(locations)
     time_matrix = [[0] * num_locations for _ in range(num_locations)]
     
     for i in range(num_locations):
         for j in range(num_locations):
-            ### MODIFIED ###
-            # Skip API call if the origin and destination are the same
             if i == j:
                 continue
-            
             loc1 = locations[i]
             loc2 = locations[j]
+            # Pass the timestamp to the API call function
             time_matrix[i][j] = get_real_travel_time(
                 loc1['latitude'], loc1['longitude'],
-                loc2['latitude'], loc2['longitude']
+                loc2['latitude'], loc2['longitude'],
+                departure_timestamp
             )
 
     save_cache()
     print("✅ Travel time matrix built successfully.")
 
-    # --- VRP Model Configuration (Unchanged) ---
+    # --- VRP Model Configuration and Solution (Unchanged) ---
+    # ... (The rest of the file is identical to the previous version)
     num_vehicles = 10
     vehicle_capacities = [50] * num_vehicles
     manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, 0)
     routing = pywrapcp.RoutingModel(manager)
-
     def time_callback(from_index, to_index):
-        """Returns total time including travel and service time."""
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
         travel_time = time_matrix[from_node][to_node]
         service_time = SERVICE_TIME_MINUTES if to_node != 0 else 0
         return travel_time + service_time
-
     transit_callback_index = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-    
     routing.AddDimension(transit_callback_index, 30, 1440, False, 'Time')
     time_dimension = routing.GetDimensionOrDie('Time')
     time_dimension.SetGlobalSpanCostCoefficient(100)
@@ -133,20 +159,15 @@ def get_solution_for_restaurant(restaurant_name):
     for i in range(num_vehicles):
         index = routing.Start(i)
         time_dimension.CumulVar(index).SetRange(time_windows[0][0], time_windows[0][1])
-
     def demand_callback(from_index):
         return demands[manager.IndexToNode(from_index)]
     demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
     routing.AddDimensionWithVehicleCapacity(demand_callback_index, 0, vehicle_capacities, True, 'Capacity')
-
-    # --- Solve the Model (Unchanged) ---
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
     search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
     search_parameters.local_search_metaheuristic = (routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH)
     search_parameters.time_limit.FromSeconds(10)
     solution = routing.SolveWithParameters(search_parameters)
-
-    # --- Extract and Return Solution (Unchanged) ---
     if solution:
         processed_solution = []
         for vehicle_id in range(num_vehicles):
