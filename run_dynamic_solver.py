@@ -1,8 +1,8 @@
 import time
 import random
 import pandas as pd
+import json
 from collections import deque
-from optimization_solver import get_real_travel_time # Use our existing API function
 from dynamic_solver import solve_for_best_insertion
 
 # --- Configuration ---
@@ -11,13 +11,16 @@ SIMULATION_END_HOUR = 17
 MINUTES_PER_TICK = 5
 PROBABILITY_OF_NEW_ORDER_PER_TICK = 0.4
 NUM_VEHICLES = 3
-DEPOT_NAME = "Swaad"
+TIME_MATRIX_FILE = 'time_matrix.json'
+MAX_STOPS_PER_ROUTE = 8
+MAX_ROUTE_DURATION_MINS = 180 # 3 hours
 
+# --- Vehicle and Order classes (unchanged) ---
 class Vehicle:
     def __init__(self, vehicle_id, start_location):
         self.id = vehicle_id
         self.location = start_location
-        self.route = [] # Now a simple list
+        self.route = []
         self.status = "idle"
         print(f"Vehicle {self.id} created at depot {self.location['original_address']}.")
 
@@ -25,7 +28,10 @@ class Vehicle:
         self.route = [all_locations[i] for i in route_indices]
         if self.route:
             self.status = "en_route"
-            print(f"Vehicle {self.id}: New route set. Next stop: {self.route[0]['original_address']}")
+            print(f"Vehicle {self.id}: Route updated. Next stop: {self.route[0]['original_address']}. Total stops: {len(self.route)}.")
+        else:
+            self.status = "idle"
+            print(f"Vehicle {self.id}: Route complete. Now idle at depot.")
 
 class Order:
     def __init__(self, order_id, location_index, time_placed_str):
@@ -34,43 +40,25 @@ class Order:
         self.time_placed = time_placed_str
         self.status = "unassigned"
 
+
 def run_full_simulation():
-    print("--- Starting DYNAMIC Delivery Simulation ---")
+    print("--- Starting DYNAMIC Delivery Simulation with Constraints ---")
 
-    # --- Load Data and Build Time Matrix ---
+    # --- Load Data (unchanged) ---
     try:
-        df_geocoded = pd.read_csv('geocoded_locations.csv')
-        # Create a list of all possible locations (depot is always first)
-        depot_info = df_geocoded[df_geocoded['original_address'].str.contains(DEPOT_NAME, na=False)].iloc[0]
-        customer_locations = df_geocoded[~df_geocoded['original_address'].str.contains(DEPOT_NAME, na=False)]
-        all_locations = [depot_info.to_dict()] + customer_locations.to_dict('records')
-        
-        # Build the master time matrix once
-        print("Building master time matrix... (This may use the cache)")
-        num_locations = len(all_locations)
-        time_matrix = [[0] * num_locations for _ in range(num_locations)]
-        # For a real dynamic sim, departure time should be current sim time, but for simplicity we use a fixed time
-        departure_timestamp = int(time.time()) + 3600 # An hour from now
-        for i in range(num_locations):
-            for j in range(num_locations):
-                if i == j: continue
-                loc1 = all_locations[i]
-                loc2 = all_locations[j]
-                time_matrix[i][j] = get_real_travel_time(
-                    loc1['latitude'], loc1['longitude'],
-                    loc2['latitude'], loc2['longitude'],
-                    departure_timestamp
-                )
-        print("✅ Master time matrix built.")
-
-    except Exception as e:
-        print(f"Error during data loading or matrix building: {e}")
+        with open(TIME_MATRIX_FILE, 'r') as f:
+            data = json.load(f)
+        all_locations = data['locations']
+        time_matrix = data['time_matrix']
+        print(f"✅ Master time matrix and {len(all_locations)} locations loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: '{TIME_MATRIX_FILE}' not found. Run 'build_master_matrix.py' first.")
         return
 
-    # --- Initialize Simulation ---
+    # --- Initialize Simulation (unchanged) ---
     vehicles = [Vehicle(i, start_location=all_locations[0]) for i in range(NUM_VEHICLES)]
     pending_orders = []
-    current_routes = {} # {vehicle_id: [node_indices]}
+    current_routes = {i: [] for i in range(NUM_VEHICLES)}
     order_counter = 0
 
     # --- Main Simulation Loop ---
@@ -78,44 +66,53 @@ def run_full_simulation():
         current_time_str = f"Day 1, {minute//60:02d}:{minute%60:02d}"
         print(f"\n--- {current_time_str} ---")
 
-        # 1. Event Generator
+        # 1. Event Generator (unchanged)
         if random.random() < PROBABILITY_OF_NEW_ORDER_PER_TICK:
             order_counter += 1
-            # Get the index of a random customer location
             random_customer_index = random.randint(1, len(all_locations) - 1)
             new_order = Order(order_counter, random_customer_index, current_time_str)
             pending_orders.append(new_order)
             print(f"EVENT: New order #{new_order.id} for {all_locations[new_order.location_index]['original_address']}.")
+            print(f"Pending orders in queue: {len(pending_orders)}")
 
-        # 2. Dynamic Re-optimization Engine
+        # --- MODIFIED: Smarter Assignment Logic ---
+        # At each time step, try to assign any order from the queue, not just the first one.
         if pending_orders:
-            order_to_assign = pending_orders.pop(0)
+            assigned_this_tick = False
             
-            print(f"OPTIMIZING: Finding best route for order #{order_to_assign.id}...")
-            
-            best_vehicle, best_index, cost = solve_for_best_insertion(
-                time_matrix,
-                current_routes,
-                order_to_assign.location_index,
-                NUM_VEHICLES
-            )
-
-            if best_vehicle is not None:
-                print(f"SOLUTION: Inserting order at position {best_index} in Vehicle {best_vehicle}'s route. New route cost: {cost} mins.")
-                # Update the route in our central tracking
-                new_route = list(current_routes.get(best_vehicle, [0])) # Start with depot if new
-                new_route.insert(best_index, order_to_assign.location_index)
-                current_routes[best_vehicle] = new_route
+            # Iterate through a copy of the list so we can safely remove items
+            for order_to_assign in pending_orders[:]:
+                print(f"OPTIMIZING: Attempting to assign order #{order_to_assign.id}...")
                 
-                # Update the actual vehicle object
-                vehicles[best_vehicle].set_route(current_routes[best_vehicle], all_locations)
-                order_to_assign.status = "assigned"
-            else:
-                print("WARNING: Could not find a valid insertion for the new order.")
-                pending_orders.append(order_to_assign) # Put it back in the queue
+                best_vehicle, best_index, cost = solve_for_best_insertion(
+                    time_matrix,
+                    current_routes,
+                    order_to_assign.location_index,
+                    NUM_VEHICLES,
+                    MAX_STOPS_PER_ROUTE,
+                    MAX_ROUTE_DURATION_MINS
+                )
+                
+                if best_vehicle is not None:
+                    print(f"SUCCESS: Assigning order #{order_to_assign.id} to Vehicle {best_vehicle}. New route duration: {int(cost)} mins.")
+                    current_routes[best_vehicle].insert(best_index, order_to_assign.location_index)
+                    vehicles[best_vehicle].set_route(current_routes[best_vehicle], all_locations)
+                    order_to_assign.status = "assigned"
+                    
+                    # Remove the assigned order from the original list
+                    pending_orders.remove(order_to_assign)
+                    assigned_this_tick = True
+                    
+                    # Once we've assigned one order, we stop and wait for the next time tick
+                    # This prevents one vehicle from getting multiple orders in the same tick
+                    break
+            
+            if not assigned_this_tick:
+                print("INFO: No pending orders could be assigned this tick.")
 
-
-    print("\n--- Dynamic Simulation Ended ---")
+    print(f"\n--- Dynamic Simulation Ended ---")
+    print(f"Orders remaining in queue: {len(pending_orders)}")
 
 if __name__ == "__main__":
     run_full_simulation()
+

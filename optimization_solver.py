@@ -2,28 +2,25 @@ import pandas as pd
 import requests
 import json
 import os
-from datetime import datetime, timedelta ### NEW ###
-import time ### NEW ###
+from datetime import datetime, timedelta
+import time
+import math # NEW: Import the math library
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
 # The fixed time in minutes spent at each customer location for the delivery.
 SERVICE_TIME_MINUTES = 5
 
-### NEW: Traffic and Departure Time Configuration ###
-# Set the day and hour you are planning for.
-# 0 = today, 1 = tomorrow, etc.
+# Traffic and Departure Time Configuration
 PLANNING_DAY_OFFSET = 1
-# Set the hour in 24-hour format (e.g., 11 for 11:00 AM)
 PLANNING_HOUR = 11
 
-# --- API Key Configuration (Unchanged) ---
-# API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-API_KEY = "AIzaSyC_hI6BowrJPojeBiRldmuFVf3aqsSRZbg"
-if API_KEY == "AIzaSyC_hI6BowrJPojeBiRldmuFVf3aqsSRZbg":
+# --- API Key Configuration ---
+API_KEY = "AIzaSyC_hI6BowrJPojeBiRldmuFVf3aqsSRZbg" # Using the key you provided
+if API_KEY == "YOUR_API_KEY_HERE": # Kept for good practice
     print("WARNING: Using a placeholder API key. Please replace 'YOUR_API_KEY_HERE' with your actual Google Maps API key.")
 
-# --- Caching (Unchanged) ---
+# --- Caching ---
 DISTANCE_CACHE_FILE = 'distance_cache.json'
 try:
     with open(DISTANCE_CACHE_FILE, 'r') as f:
@@ -35,7 +32,6 @@ def save_cache():
     with open(DISTANCE_CACHE_FILE, 'w') as f:
         json.dump(distance_cache, f, indent=4)
 
-### MODIFIED: Function now accepts a departure time ###
 def get_real_travel_time(lat1, lon1, lat2, lon2, departure_timestamp):
     """
     Gets the real-world travel time in MINUTES from the Google Maps Directions API,
@@ -43,14 +39,10 @@ def get_real_travel_time(lat1, lon1, lat2, lon2, departure_timestamp):
     """
     origin = f"{lat1},{lon1}"
     destination = f"{lat2},{lon2}"
-    
-    # The cache key now includes the timestamp to store traffic-specific data
     cache_key = f"{origin}->{destination}@{departure_timestamp}"
-    
     if cache_key in distance_cache:
         return distance_cache[cache_key]
         
-    # Add the departure_time parameter to the API request
     url = (f"https://maps.googleapis.com/maps/api/directions/json?"
            f"origin={origin}&destination={destination}&departure_time={departure_timestamp}"
            f"&traffic_model=best_guess&key={API_KEY}")
@@ -59,9 +51,11 @@ def get_real_travel_time(lat1, lon1, lat2, lon2, departure_timestamp):
         response = requests.get(url)
         data = response.json()
         if data['status'] == 'OK':
-            # Get "duration_in_traffic" if available, otherwise fall back to standard duration
             duration_seconds = data['routes'][0]['legs'][0].get('duration_in_traffic', data['routes'][0]['legs'][0]['duration'])['value']
-            duration_minutes = round(duration_seconds / 60)
+            
+            ### MODIFIED: Use math.ceil to prevent 0-minute trips ###
+            duration_minutes = math.ceil(duration_seconds / 60)
+            
             distance_cache[cache_key] = duration_minutes
             return duration_minutes
         else:
@@ -71,8 +65,10 @@ def get_real_travel_time(lat1, lon1, lat2, lon2, departure_timestamp):
         print(f"An error occurred during API call: {e}")
         return 99999
 
+# This function is part of your original STATIC solver. It is not used by the dynamic
+# simulation but is kept here for completeness.
 def get_solution_for_restaurant(restaurant_name):
-    # --- Data Loading (Unchanged) ---
+    # --- Data Loading ---
     try:
         df_orders = pd.read_csv('order_history_kaggle_data.csv')
         df_geocoded = pd.read_csv('geocoded_locations.csv')
@@ -81,14 +77,13 @@ def get_solution_for_restaurant(restaurant_name):
         print(f"Error: {e}. Make sure all CSV files are present.")
         return None, None
 
-    # --- Data Preparation (Unchanged) ---
+    # --- Data Preparation ---
     try:
         depot_info = df_geocoded[df_geocoded['original_address'].str.contains(restaurant_name, na=False)].iloc[0]
     except IndexError:
         print(f"Restaurant '{restaurant_name}' not found.")
         return None, None
     
-    # ... (rest of data preparation is the same)
     customer_subzones = df_orders[df_orders['Restaurant name'] == restaurant_name]['Subzone'].unique()
     locations = [depot_info]
     demands = [0]
@@ -107,7 +102,6 @@ def get_solution_for_restaurant(restaurant_name):
             time_windows.append((earliest, latest))
     if len(locations) <= 1: return None, None
     
-    ### MODIFIED: Calculate the departure timestamp ###
     # --- Create Time Matrix with Traffic Prediction ---
     now = datetime.now()
     planning_day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=PLANNING_DAY_OFFSET)
@@ -125,7 +119,6 @@ def get_solution_for_restaurant(restaurant_name):
                 continue
             loc1 = locations[i]
             loc2 = locations[j]
-            # Pass the timestamp to the API call function
             time_matrix[i][j] = get_real_travel_time(
                 loc1['latitude'], loc1['longitude'],
                 loc2['latitude'], loc2['longitude'],
@@ -135,8 +128,7 @@ def get_solution_for_restaurant(restaurant_name):
     save_cache()
     print("✅ Travel time matrix built successfully.")
 
-    # --- VRP Model Configuration and Solution (Unchanged) ---
-    # ... (The rest of the file is identical to the previous version)
+    # --- VRP Model Configuration and Solution ---
     num_vehicles = 10
     vehicle_capacities = [50] * num_vehicles
     manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, 0)
@@ -188,3 +180,4 @@ def get_solution_for_restaurant(restaurant_name):
         return processed_solution, locations
 
     return None, None
+

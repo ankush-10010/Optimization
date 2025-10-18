@@ -1,46 +1,53 @@
-Phase 1: Data Preparation & Geocoding 📍
-Goal: To convert the raw, text-based location data from your order history into a structured format with precise geographic coordinates.
+1. Problem Statement
+Modern e-commerce and food delivery platforms operate in a dynamic, unpredictable environment. While planning optimal routes at the start of the day is a good first step, this static approach fails to account for new orders that arrive after drivers are already on the road. A purely greedy approach of assigning the nearest driver to a new order can lead to severe imbalances, with some drivers being massively overworked while others remain idle.
 
-Initial Data (order_history_kaggle_data.csv): We started with your dataset which contained restaurant names and delivery sub-zones (e.g., "Swaad", "Sector 4") but lacked the essential latitude and longitude needed for mapping and routing.
+This project addresses the challenge of real-time fleet management. It moves beyond static, pre-planned routes to a dynamic simulation that can intelligently assign new, incoming orders to a fleet of vehicles on the fly, while respecting a complex set of real-world business constraints like driver workload and maximum route times.
 
-Address Standardization: We wrote a script to extract all unique restaurant and sub-zone locations and formatted them into clean, consistent addresses that an API could understand (e.g., "Swaad, Sector 4, Delhi NCR").
+2. Current Project Functioning
+The project has evolved from a simple route planner into a sophisticated, two-stage dynamic simulation system. It no longer creates a single, static plan. Instead, it simulates an entire day of operations, reacting to random events and making intelligent decisions in real-time.
 
-Geocoding: Using the Google Maps Geocoding API, we converted this list of addresses into precise latitude and longitude coordinates.
+The workflow is as follows:
 
-Key Output: The result of this phase was the crucial geocoded_locations.csv file. This file is the geographic backbone of the entire project.
+Stage 1: Pre-computation (Run Once)
 
-Phase 2: Demand Forecasting 📈
-Goal: To determine how many orders (the "demand") need to be delivered to each customer sub-zone.
+The build_master_matrix.py script is executed once.
 
-Historical Analysis: We went back to the original order_history_kaggle_data.csv and analyzed the Order Placed At timestamps.
+It takes a designated depot (e.g., "Swaad") and calculates the real-world, traffic-aware travel time between that depot and every other possible delivery location in the dataset using the Google Maps API.
 
-Demand Calculation: A script was written to group all orders by sub-zone and calculate the average number of orders placed per day for each one. This gives us a simple but effective demand forecast.
+This slow but essential step produces a time_matrix.json file, which acts as a complete "knowledge base" of travel times for the simulation.
 
-Key Output: This phase produced the subzone_demand.csv file, which provides the critical demand data needed for the optimization model (e.g., Sector 4 has an average demand of 43 orders/day).
+Stage 2: Dynamic Simulation (Run Anytime)
 
-Phase 3: Core Optimization (The VRP Solver) 🧠
-Goal: To build the "brain" of the project—an optimization engine that takes the location and demand data to calculate the most efficient delivery routes.
+The run_dynamic_simulation.py script is executed.
 
-Problem Formulation: We defined the challenge as a classic Vehicle Routing Problem (VRP).
+It instantly loads the pre-computed time_matrix.json.
 
-Implementation with Google OR-Tools: We wrote a comprehensive Python script that:
+It starts a time loop, simulating a full workday minute by minute.
 
-Loads all three of your data files.
+Throughout the day, it randomly generates new customer orders.
 
-Identifies a restaurant ("Swaad") to act as the central depot.
+For each new order, it uses the dynamic_solver to find the most efficient vehicle and route insertion point without violating business rules (like maximum stops or route duration).
 
-Builds a distance matrix to calculate the travel distance between all locations.
+It prints a real-time log of all events, decisions, and assignments to the console, showing how the fleet is managed throughout the day.
 
-Sets the problem's rules (constraints), such as the number of vehicles available (10) and their carrying capacity (50 orders).
+3. File Summary and Their Roles
+Your project now consists of a suite of specialized Python scripts, each with a distinct and important role.
 
-Debugging and Refinement: This was the most challenging part. We successfully troubleshooted and fixed several issues:
+Core Data & API Files:
+optimization_solver.py
 
-Solved the initial "No solution found!" error by increasing vehicle capacity.
+What it does: This file now serves as a powerful utility library. Its most important function is get_real_travel_time, which handles all communication with the Google Maps Directions API, including caching and traffic prediction logic. It still contains the original static solver (get_solution_for_restaurant), but that function is no longer used by the dynamic simulation.
 
-Identified and fixed a subtle data mismatch bug that was preventing the solver from working.
+Simulation Pre-computation File:
+build_master_matrix.py
 
-Corrected a final error in the code that prints the results.
+What it does: This is the data preparation engine. It runs once to do the slow, heavy work of calling the get_real_travel_time function for every possible pair of locations. It saves its output—a complete travel time matrix and a list of locations—into time_matrix.json, enabling the main simulation to start instantly.
 
-Key Output: We now have a fully functional and debugged optimization script, solve_vrp.py. The script successfully runs, finds the optimal solution (✅ Solution found!), and is ready to display the detailed routes.
+Simulation Engine Files:
+dynamic_solver.py
 
-In summary, you have successfully transformed raw data into a powerful logistics model. You've prepared the geographic data, quantified customer demand, and built a working solver that can find the best possible delivery plan. The project is now ready for the final, visual phase.
+What it does: This is the "quick-thinking" brain of the simulation. It contains the solve_for_best_insertion function. This is not a full VRP solver; it's a lightweight, fast heuristic that takes a set of current routes and one new order, and instantly calculates the most efficient way to insert that order while respecting all business constraints (max stops, max route time).
+
+run_dynamic_simulation.py
+
+What it does: This is the main script and heart of the project. It orchestrates the entire simulation. It loads the master time matrix, initializes the vehicles, runs the clock, generates random new orders, and uses the dynamic_solver to make real-time assignment decisions. Its output is the detailed text log that shows the entire day's operations.

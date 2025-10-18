@@ -1,70 +1,63 @@
-import copy
-from ortools.constraint_solver import pywrapcp
+def calculate_route_cost(route, time_matrix, depot_index=0):
+    """Calculates the total time/cost of a given route."""
+    if not route:
+        return 0
+    
+    total_cost = 0
+    # Cost from depot to the first stop
+    total_cost += time_matrix[depot_index][route[0]]
+    
+    # Cost between stops
+    for i in range(len(route) - 1):
+        total_cost += time_matrix[route[i]][route[i+1]]
+        
+    # Cost from the last stop back to the depot
+    total_cost += time_matrix[route[-1]][depot_index]
+    
+    return total_cost
 
-# Note: This file doesn't need pandas or requests. It only does the math.
-# It assumes a pre-built time_matrix is provided.
 
-def solve_for_best_insertion(time_matrix, current_routes, new_order_index, num_vehicles, depot_index=0):
+def solve_for_best_insertion(time_matrix, current_routes, new_order_index, num_vehicles,
+                             max_stops_per_route, max_route_duration, depot_index=0):
     """
-    Calculates the best vehicle and position to insert a new order.
-
-    Args:
-        time_matrix: The matrix of travel times between all locations.
-        current_routes: A list of lists, where each sublist is a vehicle's current route.
-        new_order_index: The index of the new order's location in the time_matrix.
-        num_vehicles: The total number of vehicles in the fleet.
-        depot_index: The index of the depot.
-
-    Returns:
-        A tuple: (best_vehicle_id, best_insertion_index, new_route_cost)
-        Returns (None, None, float('inf')) if no valid insertion is found.
+    Calculates the best vehicle and position to insert a new order,
+    respecting the new constraints.
     """
     best_cost_increase = float('inf')
     best_vehicle_id = None
     best_insertion_index = None
+    final_route_cost = 0
 
     for vehicle_id in range(num_vehicles):
-        # If a vehicle is idle or doesn't have a route yet, create a simple new route for it
-        if not current_routes.get(vehicle_id):
-            # Cost to go from depot -> new_order -> depot
-            cost = time_matrix[depot_index][new_order_index] + time_matrix[new_order_index][depot_index]
-            if cost < best_cost_increase:
-                best_cost_increase = cost
-                best_vehicle_id = vehicle_id
-                best_insertion_index = 1 # Insert after the depot
-            continue
+        original_route = current_routes.get(vehicle_id, [])
+        
+        # --- CONSTRAINT CHECK ---
+        if len(original_route) >= max_stops_per_route:
+            continue # Skip this vehicle, it's full
 
-        # Try inserting the new order at every possible position in an existing route
-        original_route = current_routes[vehicle_id]
-        for i in range(1, len(original_route) + 1):
-            # The original cost of the segment we are breaking
-            from_node = original_route[i - 1]
-            to_node = original_route[i] if i < len(original_route) else depot_index
-            original_segment_cost = time_matrix[from_node][to_node]
+        original_cost = calculate_route_cost(original_route, time_matrix)
 
-            # The new cost of inserting the order
-            cost_to_new = time_matrix[from_node][new_order_index]
-            cost_from_new = time_matrix[new_order_index][to_node]
-            new_segment_cost = cost_to_new + cost_from_new
+        # Try inserting the new order at every possible position
+        for i in range(len(original_route) + 1):
+            temp_route = original_route[:]
+            temp_route.insert(i, new_order_index)
+            
+            new_cost = calculate_route_cost(temp_route, time_matrix)
+            
+            # --- CONSTRAINT CHECK ---
+            if new_cost > max_route_duration:
+                continue # Skip this insertion, it makes the route too long
 
-            cost_increase = new_segment_cost - original_segment_cost
+            cost_increase = new_cost - original_cost
 
             if cost_increase < best_cost_increase:
                 best_cost_increase = cost_increase
                 best_vehicle_id = vehicle_id
                 best_insertion_index = i
+                final_route_cost = new_cost
 
-    # We need to calculate the full cost of the new best route
     if best_vehicle_id is not None:
-        new_route = list(current_routes.get(best_vehicle_id, [depot_index]))
-        new_route.insert(best_insertion_index, new_order_index)
-        
-        # Calculate total cost of this newly proposed route
-        total_cost = 0
-        for i in range(len(new_route) - 1):
-            total_cost += time_matrix[new_route[i]][new_route[i+1]]
-        total_cost += time_matrix[new_route[-1]][depot_index] # Return to depot
-        
-        return (best_vehicle_id, best_insertion_index, total_cost)
+        return (best_vehicle_id, best_insertion_index, final_route_cost)
 
     return (None, None, float('inf'))
+
